@@ -3,7 +3,9 @@ from langchain.chat_models import ChatOpenAI
 import gradio as gr
 import os
 import streamlit as st
+from secrets_1 import openai_key
 
+os.environ["OPENAI_API_KEY"] = openai_key
 
 def construct_index(directory_path):
     max_input_size = 4096
