@@ -1,8 +1,10 @@
-from gpt_index import SimpleDirectoryReader,  GPTSimpleVectorIndex, LLMPredictor, PromptHelper
-from langchain.chat_models import ChatOpenAI
-import gradio as gr
+from llama_index import SimpleDirectoryReader, GPTListIndex
+from llama_index.node_parser import SimpleNodeParser
+from llama_index.prompts  import PromptTemplate
+from llama_index.llms import ChatMessage, MessageRole
+from llama_index.chat_engine import CondenseQuestionChatEngine
 import os
-import streamlit as st
+
 #You will need to create a file called keys.py to hold your personal open AI Key using the following variable declaration
 # openai_key = "[YOUR OPENAI API KEY]"
 from keys import openai_key
@@ -10,39 +12,70 @@ from keys import openai_key
 #Or you can directly input your Key it into the enviornmental variable declaration below 
 # in place of openai_key if you aren't intending to make your code public.
 os.environ["OPENAI_API_KEY"] = openai_key
+ 
 
-#create a json file holding the chat history including the prompts, knowledge, base and responses. 
-def construct_index(directory_path):
-    max_input_size = 4096
-    num_outputs = 512
-    max_chunk_overlap = 20
-    chunk_size_limit = 600
+#Define what documents are to go into the KB
+docs= SimpleDirectoryReader("docs").load_data()
+#Parse the documents into smaller nodes for indexing and searching
+parser = SimpleNodeParser.from_defaults()
+nodes = parser.get_nodes_from_documents(docs)
 
-    prompt_helper = PromptHelper(max_input_size, num_outputs, max_chunk_overlap, chunk_size_limit=chunk_size_limit)
+#Using a list index, as our KB is fairly small and we want summarization of multiple texts
+#if the kb changes in size drastically, can look into different more embedding-heavy indexing
+index = GPTListIndex.from_documents(docs)
 
-    llm_predictor = LLMPredictor(llm=ChatOpenAI(temperature=0.7, model_name="gpt-3.5-turbo", max_tokens=num_outputs))
+#Prompt given to LLM to synthesize the chat history and user question into a single cohesive openai prompt
+custom_prompt = PromptTemplate("""\
+Given a conversation (between Parent and Assistant), \
+rewrite the Parent's Question to be a standalone prompt that captures all relevant context \
+from the Chat History. The standalone prompt should always take the form of "In 50 words or less...", the Parent's Question, (Context: all relevant context from the Chat History),  \
+and end with the phrase 'ask follow up question for user reflection. Say you don't know if the Parent's Question is outside of PATbot's purpose' 
 
-    documents = SimpleDirectoryReader(directory_path).load_data()
+<Chat History> 
+{chat_history}               
 
-    index = GPTSimpleVectorIndex(documents, llm_predictor=llm_predictor, prompt_helper=prompt_helper)
+<Parent's Question>
+{question}
 
-    index.save_to_disk('index.json')
+<Standalone prompt>
 
-    return index
+""")
 
-#cosntructs the chatbot response by querying the prompt formulated by the user and the json modifications
-def chatbot(input_text):
-    index = GPTSimpleVectorIndex.load_from_disk('index.json')
-    response = index.query(input_text, response_mode="compact")
-    return response.response
+# list of `ChatMessage` objects to start the conversation, Pulled from the PATbot script
+custom_chat_history = [
+    ChatMessage(
+        role=MessageRole.ASSISTANT, 
+        content="I am PATbot! I am a parent assistant tool for mental wellbeing. I am not a therapist \
+            but I have been trained by experts to help explain behavior to parents of children with behavioral problems"
+    ),
+]
 
-#Creates a basic user interface using gradio
-iface = gr.Interface(fn=chatbot,
-                     inputs=gr.components.Textbox(lines=7, label="Enter your text"),
-                     outputs="text",
-                     title="Custom-trained AI Chatbot")
+#assigns the ai query_engine (run by the chat_engine) to sort through index and openai
+query_engine = index.as_query_engine()
 
-#Pulls the knowledge base from the docs folder
-index = construct_index("docs")
-#launches the AI on a local server. 
-iface.launch(share=True)
+#Creates the chat engine which uses the prompt to condense user question and chat_history context
+#This will then be passed through to the query_engine assigned
+chat_engine = CondenseQuestionChatEngine.from_defaults(
+    query_engine=query_engine, 
+    condense_question_prompt=custom_prompt,
+    chat_history=custom_chat_history,
+    verbose=True
+)
+
+#Obtain the user_question by asking the user directly. 
+user_question = input("User Question: ")
+#while the user has a question instead of typing "stop", ask the chatbot
+#To exit the loop, the user types "stop"
+while user_question.lower() != "stop":
+    #Transform the user_question into a condensed prompt, and query database with the prompt
+    response = chat_engine.chat(user_question)
+    #visually seperate and print the response
+    print("-------------")
+    print (response)
+    print("------------")
+    #Ask for the next question/user input
+    user_question = input("User Question: ")
+
+#clear chat history at the end of a conversation. 
+chat_engine.reset()
+

@@ -1,5 +1,4 @@
 openai
-gpt_index
+llama_index
 langchain
 PyPDF2
-gradio
